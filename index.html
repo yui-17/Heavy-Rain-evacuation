@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>【あなた専用】大雨災害・避難誘導分析画面</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body { margin: 0; padding: 0; }
+        #map { height: 100vh; width: 100vw; }
+        .info-panel {
+            position: absolute; top: 10px; right: 10px; z-index: 1000;
+            background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+            max-width: 280px; font-family: sans-serif;
+        }
+        .view-controls { display: flex; gap: 5px; margin-bottom: 15px; }
+        .view-btn {
+            flex: 1; padding: 8px 5px; font-size: 11px; cursor: pointer;
+            border: 1px solid #1a73e8; background: white; color: #1a73e8;
+            border-radius: 4px; transition: 0.3s;
+        }
+        .view-btn.active { background: #1a73e8; color: white; }
+        .user-item { display: flex; align-items: center; font-size: 11px; margin-bottom: 4px; }
+        .color-dot { width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; }
+        .legend { font-size: 10px; margin-top: 10px; color: #666; border-top: 1px solid #eee; padding-top: 10px;}
+        .color-box { width: 12px; height: 12px; margin-right: 5px; border-radius: 2px; display: inline-block; vertical-align: middle;}
+    </style>
+</head>
+<body>
+ 
+<div class="info-panel">
+    <h2 style="font-size: 14px; margin: 0 0 10px 0;">大雨避難・現在地分析システム (マイプロジェクト版)</h2>
+    <div class="view-controls">
+        <button id="btnHeat" class="view-btn active" onclick="switchView('heat')">混雑度（ヒートマップ）</button>
+        <button id="btnMarker" class="view-btn" onclick="switchView('marker')">避難者の位置</button>
+    </div>
+    <div id="count" style="font-size: 18px; font-weight: bold; margin-bottom: 10px;">接続中...</div>
+    <div id="userList" style="max-height: 120px; overflow-y: auto; margin-bottom: 10px;"></div>
+    <div class="legend" id="heatLegend">
+        <strong>浸水深さの目安</strong><br>
+        <span class="color-box" style="background: blue;"></span> 足首程度の冠水 / <span class="color-box" style="background: red;"></span> 膝上の激しい冠水<br><br>
+        <strong>マップ上の表示</strong><br>
+        <span class="color-box" style="background: rgba(255,0,0,0.4); border: 1px solid red;"></span> 冠水危険エリア（ハザードマップ準拠）<br>
+        🟢 ピン：安全な屋内避難所
+    </div>
+</div>
+ 
+<div id="map"></div>
+ 
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+ 
+<script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+    import { getFirestore, collection, query, onSnapshot, orderBy } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+ 
+    // あなた専用のFirebase設定（綺麗に修正しました）
+    const firebaseConfig = {
+        apiKey: "AIzaSyBG-JwC9VKwnSHaSkvGLzNLvXtvZ3U0q6M",
+        authDomain: "heavy-rain-evacuation.firebaseapp.com",
+        projectId: "heavy-rain-evacuation",
+        storageBucket: "heavy-rain-evacuation.firebasestorage.app",      
+        appId: "1:405482442865:web:99c4a046167821b4abcbd0"
+    };
+ 
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+ 
+    // 立正大学熊谷キャンパスのマップ設定
+    const AREA_POLYGON = [[36.110889, 139.360278], [36.110306, 139.370194], [36.104889, 139.365111], [36.106222, 139.357861]];
+    const FLOOD_ZONE = [[36.1075, 139.3595], [36.1075, 139.3618], [36.1055, 139.3618], [36.1055, 139.3595]];
+
+    const map = L.map('map').setView([36.1080, 139.3630], 16);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+
+    L.polygon(AREA_POLYGON, { color: '#1a73e8', weight: 2, fillOpacity: 0.01, dashArray: '5, 10' }).addTo(map);
+    L.polygon(FLOOD_ZONE, { color: 'red', fillColor: '#ff0000', fillOpacity: 0.35, weight: 2 }).addTo(map);
+
+    // 安全な屋内避難所
+    L.marker([36.1088, 139.3640], {
+        icon: L.divIcon({
+            className: 'custom-div-icon',
+            html: "<div style='background-color:#2ecc71; width:14px; height:14px; border-radius:50%; border:2px white solid; box-shadow: 0 0 5px rgba(0,0,0,0.5);'></div>",
+            iconSize: [14, 14], iconAnchor: [7, 7]
+        })
+    }).bindPopup("<b>【安全な屋内避難所】</b><br>11号棟・ユニバーサル館周辺").addTo(map);
+
+    // 各レイヤーの定義
+    let heatLayer = L.heatLayer([], { 
+        radius: 12, blur: 8, maxZoom: 18,
+        gradient: {0.2: 'blue', 0.5: 'lime', 0.7: 'yellow', 0.9: 'red', 1.0: 'maroon'}
+    }).addTo(map);
+    let markerGroup = L.layerGroup();
+ 
+    window.switchView = (type) => {
+        const btnH = document.getElementById('btnHeat'); const btnM = document.getElementById('btnMarker'); const legend = document.getElementById('heatLegend');
+        if (type === 'heat') { map.addLayer(heatLayer); map.removeLayer(markerGroup); btnH.classList.add('active'); btnM.classList.remove('active'); legend.style.display = 'block'; }
+        else { map.removeLayer(heatLayer); map.addLayer(markerGroup); btnH.classList.remove('active'); btnM.classList.add('active'); legend.style.display = 'none'; }
+    };
+ 
+    const userColors = {};
+    const getColor = (id) => {
+        if (!userColors[id]) {
+            const colors = ['#e74c3c', '#3498db', '#2ecc71', '#f1c40f', '#9b59b6', '#e67e22', '#1abc9c'];
+            userColors[id] = colors[Object.keys(userColors).length % colors.length];
+        } return userColors[id];
+    };
+ 
+    // あなたのFirebase内に「oame_live_data」という名前のコレクション（データ部屋）を自動作成して監視します
+    const q = query(collection(db, "oame_live_data"), orderBy("timestamp", "desc"));
+ 
+    onSnapshot(q, (snapshot) => {
+        const heatPoints = []; const latestPositions = {}; markerGroup.clearLayers();
+        snapshot.forEach((doc) => {
+            const data = doc.data();
+            if (data.lat && data.lng && data.deviceId) {
+                if (!latestPositions[data.deviceId]) { latestPositions[data.deviceId] = { lat: data.lat, lng: data.lng }; }
+            }
+        });
+ 
+        const userListEl = document.getElementById('userList');
+        userListEl.innerHTML = '<strong>現在の避難者:</strong>';
+        let userCount = 0;
+ 
+        for (const deviceId in latestPositions) {
+            const pos = latestPositions[deviceId]; const color = getColor(deviceId); userCount++;
+            heatPoints.push([pos.lat, pos.lng, 1.0]);
+            L.circleMarker([pos.lat, pos.lng], { radius: 7, color: color, fillColor: color, fillOpacity: 0.9, weight: 2 }).bindPopup(`避難者ID: ${deviceId.substring(0,6)}`).addTo(markerGroup);
+            userListEl.innerHTML += `<div class="user-item"><span class="color-dot" style="background:${color}"></span>ID: ${deviceId.substring(0,6)}</div>`;
+        }
+        heatLayer.setLatLngs(heatPoints);
+        document.getElementById('count').innerText = `避難誘導中：${userCount} 名`;
+    });
+</script>
+</body>
+</html>
