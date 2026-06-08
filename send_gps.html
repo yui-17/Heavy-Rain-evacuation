@@ -4,7 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>避難実験用 - 送信側画面</title>
+    
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
     <style>
         body { 
             margin: 0; 
@@ -14,7 +17,6 @@
             height: 100vh; 
             width: 100vw; 
         }
-        /* 上部に状態を表示するステータスバー */
         #status {
             position: absolute; 
             top: 10px; 
@@ -35,8 +37,6 @@
 
     <div id="status">GPS信号を待機中...</div>
     <div id="map"></div>
-
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
     <script type="module">
         // Firebaseモジュールの読み込み
@@ -73,4 +73,81 @@
                 const xj = vs[j][0], yj = vs[j][1];
                 
                 const intersect = ((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
-                if (intersect) inside =
+                if (intersect) inside = !inside;
+            }
+            return inside;
+        }
+
+        // 【デバイスID管理】ブラウザにIDを保存
+        function getDeviceId() {
+            let id = localStorage.getItem('device_id');
+            if (!id) {
+                id = 'user_' + Math.random().toString(36).substring(2, 9);
+                localStorage.setItem('device_id', id);
+            }
+            return id;
+        }
+
+        // 地図の表示設定（初期位置：立正大学熊谷キャンパス）
+        const map = L.map('map').setView([36.1085, 139.3625], 16);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+        
+        // 実験エリアを青い枠で表示
+        L.polygon(AREA_POLYGON, { color: 'blue', weight: 1, fillOpacity: 0.05 }).addTo(map);
+
+        // 【現在地マーカー】青い丸で現在地を表現
+        let currentPosMarker = L.circleMarker([0, 0], {
+            radius: 10, 
+            color: '#FFFFFF', 
+            weight: 2, 
+            fillColor: '#007AFF', 
+            fillOpacity: 1
+        }).addTo(map);
+
+        // 【メイン処理】位置の取得・描画・送信をまとめた関数
+        async function updateAndSendLocation() {
+            if (!navigator.geolocation) return;
+
+            navigator.geolocation.getCurrentPosition(async (position) => {
+                const lat = position.coords.latitude;
+                const lng = position.coords.longitude;
+
+                // 1. 地図上の自分の位置（青い丸）を更新し、画面を追従させる
+                currentPosMarker.setLatLng([lat, lng]);
+                map.panTo([lat, lng]);
+
+                // 2. 実験エリア（大学敷地）内にいるかチェック
+                if (isInside([lat, lng], AREA_POLYGON)) {
+                    document.getElementById('status').innerText = "エリア内：データを送信中";
+                    document.getElementById('status').style.color = "green";
+                    
+                    try {
+                        // 3. あなたのFirebaseの「oame_live_data」コレクションへ保存
+                        await addDoc(collection(db, "oame_live_data"), {
+                            lat: lat,
+                            lng: lng,
+                            timestamp: serverTimestamp(),
+                            deviceId: getDeviceId()
+                        });
+                    } catch (e) { 
+                        console.error("送信失敗: ", e); 
+                    }
+                } else {
+                    document.getElementById('status').innerText = "エリア外：送信を停止しています";
+                    document.getElementById('status').style.color = "red";
+                }
+            }, (err) => {
+                console.error(err);
+                document.getElementById('status').innerText = "GPS取得エラー：位置情報を許可してください";
+                document.getElementById('status').style.color = "orange";
+            }, { enableHighAccuracy: true });
+        }
+
+        // 10秒ごとにこの処理を繰り返す
+        setInterval(updateAndSendLocation, 10000);
+        
+        // 初回起動
+        updateAndSendLocation(); 
+    </script>
+</body>
+</html>
