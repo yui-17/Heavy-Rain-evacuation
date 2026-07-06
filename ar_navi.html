@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>AR避難ナビ</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            background: #000;
+            color: #fff;
+            font-family: 'Helvetica Neue', sans-serif;
+            height: 100vh;
+            width: 100vw;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            user-select: none;
+        }
+
+        /* ステータスバー（上部） */
+        #status-bar {
+            position: absolute;
+            top: 24px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 10px 24px;
+            border-radius: 30px;
+            font-size: 15px;
+            font-weight: bold;
+            white-space: nowrap;
+            letter-spacing: 0.5px;
+            transition: background 0.5s;
+        }
+        .status-waiting  { background: rgba(120,120,120,0.85); }
+        .status-danger   { background: rgba(200, 40, 40, 0.9); box-shadow: 0 0 20px rgba(255,60,60,0.5); }
+        .status-safe     { background: rgba(30, 160, 60, 0.9); box-shadow: 0 0 20px rgba(60,255,100,0.3); }
+
+        /* 矢印 */
+        #arrow-wrapper {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 180px;
+            height: 180px;
+            margin-bottom: 20px;
+        }
+
+        #arrow {
+            width: 0;
+            height: 0;
+            border-left:  55px solid transparent;
+            border-right: 55px solid transparent;
+            border-bottom: 140px solid #FFD700;
+            filter: drop-shadow(0 0 18px rgba(255, 215, 0, 0.9));
+            transition: transform 0.25s ease-out;
+            transform-origin: center 70%;
+        }
+
+        /* 目的地ラベル */
+        #destination-label {
+            font-size: 20px;
+            font-weight: bold;
+            color: #FFD700;
+            text-shadow: 0 0 12px rgba(255,215,0,0.7);
+            margin-bottom: 10px;
+            letter-spacing: 1px;
+        }
+
+        /* 距離表示 */
+        #distance-display {
+            font-size: 48px;
+            font-weight: 900;
+            color: #fff;
+            letter-spacing: -1px;
+            text-shadow: 0 2px 12px rgba(0,0,0,0.8);
+        }
+
+        #distance-unit {
+            font-size: 22px;
+            font-weight: 400;
+            color: rgba(255,255,255,0.7);
+            margin-top: 4px;
+        }
+
+        /* iOSジャイロ許可ボタン */
+        #permission-btn {
+            display: none;
+            position: absolute;
+            bottom: 80px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 16px 36px;
+            font-size: 16px;
+            font-weight: bold;
+            background: #FFD700;
+            color: #000;
+            border: none;
+            border-radius: 12px;
+            cursor: pointer;
+            box-shadow: 0 4px 16px rgba(255,215,0,0.5);
+        }
+
+        /* デバッグ情報（左下） */
+        #debug-info {
+            position: absolute;
+            bottom: 12px;
+            left: 12px;
+            font-size: 10px;
+            color: rgba(255,255,255,0.3);
+            line-height: 1.6;
+        }
+
+        /* GPS取得中スピナー */
+        #loading {
+            position: absolute;
+            font-size: 13px;
+            color: rgba(255,255,255,0.4);
+            bottom: 12px;
+            right: 12px;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="status-bar" class="status-waiting">📡 データ取得中...</div>
+
+    <div id="arrow-wrapper">
+        <div id="arrow"></div>
+    </div>
+
+    <div id="destination-label">--</div>
+    <div id="distance-display">--</div>
+    <div id="distance-unit">目的地まで</div>
+
+    <button id="permission-btn" onclick="requestGyroPermission()">
+        🔄 コンパスを有効にする（iOSのみ）
+    </button>
+
+    <div id="debug-info">
+        heading: --°　|　bearing: --°　|　arrow: --°
+    </div>
+    <div id="loading">取得中...</div>
+
+<script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+    import { getFirestore, collection, query, orderBy, limit, getDocs }
+        from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+
+    // ★ Firebaseの設定
+    const firebaseConfig = {
+        apiKey: "AIzaSyBG-JwC9VKwnSHaSkvGLzNLvXtvZ3U0q6M",
+        authDomain: "heavy-rain-evacuation.firebaseapp.com",
+        projectId: "heavy-rain-evacuation",
+        storageBucket: "heavy-rain-evacuation.firebasestorage.app",
+        databaseURL: "https://heavy-rain-evacuation-default-rtdb.firebaseio.com/",
+        appId: "1:405482442865:web:99c4a046167821b4abcbd0"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db  = getFirestore(app);
+
+    // ========================================
+    // エリア・建物の定義
+    // ========================================
+    const FLOOD_ZONE = [
+        [36.1075, 139.3595],
+        [36.1075, 139.3618],
+        [36.1055, 139.3618],
+        [36.1055, 139.3595]
+    ];
+
+    const SAFE_PLACE = { lat: 36.1088, lng: 139.3638, name: "アカデミックキューブ" };
+
+    const BUILDINGS = [
+        { lat: 36.1088, lng: 139.3638, name: "アカデミックキューブ" },
+        { lat: 36.1091, lng: 139.3638, name: "スポーツキューブ" },
+        { lat: 36.1098, lng: 139.3632, name: "パドマ" },
+        { lat: 36.1095, lng: 139.3605, name: "ユニデンスA館" },
+        { lat: 36.1097, lng: 139.3617, name: "ユニデンスB館" },
+        { lat: 36.1082, lng: 139.3622, name: "2号館" },
+        { lat: 36.1073, lng: 139.3649, name: "図書館" },
+        { lat: 36.1065, lng: 139.3648, name: "3号館" },
+    ];
+
+    // ========================================
+    // 状態変数
+    // ========================================
+    let currentLat    = null;
+    let currentLng    = null;
+    let deviceHeading = 0;  // スマホの向き（北=0°）
+    let bearingToTarget = 0;
+
+    // ========================================
+    // 計算関数
+    // ========================================
+    function isInsidePolygon(lat, lng, polygon) {
+        let inside = false;
+        for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+            const xi = polygon[i][0], yi = polygon[i][1];
+            const xj = polygon[j][0], yj = polygon[j][1];
+            const intersect = ((yi > lat) !== (yj > lat)) &&
+                (lng < (xj - xi) * (lat - yi) / (yj - yi) + xi);
+            if (intersect) inside = !inside;
+        }
+        return inside;
+    }
+
+    function calcDistance(lat1, lng1, lat2, lng2) {
+        const R = 6371000;
+        const dLat = (lat2 - lat1) * Math.PI / 180;
+        const dLng = (lng2 - lng1) * Math.PI / 180;
+        const a = Math.sin(dLat / 2) ** 2 +
+                  Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                  Math.sin(dLng / 2) ** 2;
+        return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    }
+
+    // 北を0°として時計回りの方位角
+    function calcBearing(lat1, lng1, lat2, lng2) {
+        const dLng  = (lng2 - lng1) * Math.PI / 180;
+        const lat1R = lat1 * Math.PI / 180;
+        const lat2R = lat2 * Math.PI / 180;
+        const y = Math.sin(dLng) * Math.cos(lat2R);
+        const x = Math.cos(lat1R) * Math.sin(lat2R) -
+                  Math.sin(lat1R) * Math.cos(lat2R) * Math.cos(dLng);
+        return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+    }
+
+    function getNearestBuilding(lat, lng) {
+        return BUILDINGS.reduce((nearest, b) => {
+            const d = calcDistance(lat, lng, b.lat, b.lng);
+            const dNearest = calcDistance(lat, lng, nearest.lat, nearest.lng);
+            return d < dNearest ? b : nearest;
+        });
+    }
+
+    // ========================================
+    // UI更新
+    // ========================================
+    function updateUI() {
+        if (currentLat === null) return;
+
+        const inFloodZone = isInsidePolygon(currentLat, currentLng, FLOOD_ZONE);
+        const dest = inFloodZone ? SAFE_PLACE : getNearestBuilding(currentLat, currentLng);
+
+        const distance = calcDistance(currentLat, currentLng, dest.lat, dest.lng);
+        bearingToTarget = calcBearing(currentLat, currentLng, dest.lat, dest.lng);
+
+        // 矢印の角度 = 目的地の方位 − 端末の向き
+        const arrowAngle = bearingToTarget - deviceHeading;
+        document.getElementById('arrow').style.transform = `rotate(${arrowAngle}deg)`;
+
+        // テキスト更新
+        document.getElementById('destination-label').textContent = dest.name;
+        document.getElementById('distance-display').textContent  = `${Math.round(distance)} m`;
+
+        // ステータスバー
+        const statusEl = document.getElementById('status-bar');
+        if (inFloodZone) {
+            statusEl.textContent  = "⚠️ 危険エリア内 → 安全地帯へ！";
+            statusEl.className    = "status-danger";
+        } else {
+            statusEl.textContent  = `✅ 最寄り建物へ避難`;
+            statusEl.className    = "status-safe";
+        }
+
+        // デバッグ
+        document.getElementById('debug-info').textContent =
+            `heading: ${Math.round(deviceHeading)}°  |  bearing: ${Math.round(bearingToTarget)}°  |  arrow: ${Math.round(arrowAngle)}°`;
+        document.getElementById('loading').textContent = "受信中 ✓";
+    }
+
+    // ========================================
+    // Firestoreから現在地取得（2秒ごと）
+    // ========================================
+    async function fetchCurrentLocation() {
+        try {
+            const q = query(
+                collection(db, "oame_live_data"),
+                orderBy("timestamp", "desc"),
+                limit(1)
+            );
+            const snapshot = await getDocs(q);
+            if (!snapshot.empty) {
+                const data = snapshot.docs[0].data();
+                currentLat = data.lat;
+                currentLng = data.lng;
+                updateUI();
+            }
+        } catch (e) {
+            console.error("現在地取得エラー:", e);
+            document.getElementById('loading').textContent = "取得エラー ✗";
+        }
+    }
+
+    // ========================================
+    // ジャイロ・コンパス設定
+    // ========================================
+    function setupGyro() {
+        // iOS 13以降は許可が必要
+        if (typeof DeviceOrientationEvent !== 'undefined' &&
+            typeof DeviceOrientationEvent.requestPermission === 'function') {
+            document.getElementById('permission-btn').style.display = 'block';
+        } else {
+            startListening();
+        }
+    }
+
+    window.requestGyroPermission = function () {
+        DeviceOrientationEvent.requestPermission().then(state => {
+            if (state === 'granted') {
+                document.getElementById('permission-btn').style.display = 'none';
+                startListening();
+            } else {
+                alert('コンパスの許可が必要です。設定から許可してください。');
+            }
+        }).catch(console.error);
+    };
+
+    function startListening() {
+        // Androidはdeviceorientationabsoluteが使える
+        window.addEventListener('deviceorientationabsolute', (e) => {
+            if (e.alpha !== null) {
+                deviceHeading = e.alpha;
+                updateUI();
+            }
+        }, true);
+
+        // iOSはwebkitCompassHeading、Androidのフォールバックはalpha
+        window.addEventListener('deviceorientation', (e) => {
+            if (e.webkitCompassHeading !== undefined) {
+                deviceHeading = e.webkitCompassHeading; // iOS（真北基準）
+            } else if (e.absolute && e.alpha !== null) {
+                deviceHeading = e.alpha;                // Android絶対値
+            }
+            updateUI();
+        }, true);
+    }
+
+    // ========================================
+    // 起動
+    // ========================================
+    fetchCurrentLocation();
+    setInterval(fetchCurrentLocation, 2000);
+    setupGyro();
+</script>
+</body>
+</html>
